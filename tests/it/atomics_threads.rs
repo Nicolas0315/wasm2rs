@@ -100,6 +100,29 @@ fn notify_with_no_waiters_returns_zero() {
 }
 
 #[test]
+fn shared_memory_grow_respects_declared_maximum_for_siblings() {
+    // A sibling instance sees the same shared memory. The maximum check and
+    // resize must occur under one guard, so both instances observe size two and
+    // a failed second growth leaves it unchanged.
+    compile_run_raw(
+        "atomics_threads_grow_declared_maximum",
+        r#"(module
+            (memory 1 2 shared)
+            (func (param i32) (result i32) local.get 0 memory.grow)
+            (func (result i32) memory.size))"#,
+        r#"fn main() {
+            let mut first = Instance::new();
+            let memory = first.shared_memory();
+            let mut sibling = Instance::with_memory(memory);
+            assert_eq!(first.func0(1), 1);
+            assert_eq!(sibling.func1(), 2);
+            assert_eq!(sibling.func0(1), -1);
+            assert_eq!(first.func1(), 2);
+        }"#,
+    );
+}
+
+#[test]
 fn wait_blocks_until_notified() {
     // A real handshake: a waiter thread parks on `wait32(addr=0, expected=0)`
     // while the cell is 0; the main thread later stores 1 and notifies, waking

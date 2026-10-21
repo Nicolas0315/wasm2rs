@@ -239,6 +239,36 @@ fn memory_size_and_grow() {
 }
 
 #[test]
+fn memory_grow_respects_declared_maximum() {
+    // A declared maximum of two pages limits successful growth even though the
+    // wasm32 hard cap is much larger. A failed growth preserves both size and
+    // existing bytes; signed negative deltas are interpreted as large unsigned
+    // page counts and therefore fail too.
+    transpile_compile_run(
+        "mem_grow_declared_maximum",
+        r#"
+        (module
+          (memory 1 2)
+          (func (param i32) (result i32) (memory.grow (local.get 0)))
+          (func (result i32) (memory.size))
+          (func (param i32 i32) (i32.store8 (local.get 0) (local.get 1)))
+          (func (param i32) (result i32) (i32.load8_u (local.get 0))))
+        "#,
+        "let mut inst = Instance::new();\n    \
+         inst.func2(0, 0x5A);\n    \
+         assert_eq!(inst.func0(0), 1);\n    \
+         assert_eq!(inst.func0(1), 1);\n    \
+         assert_eq!(inst.func1(), 2);\n    \
+         assert_eq!(inst.func3(0), 0x5A);\n    \
+         assert_eq!(inst.func0(1), -1);\n    \
+         assert_eq!(inst.func1(), 2);\n    \
+         assert_eq!(inst.func3(0), 0x5A);\n    \
+         assert_eq!(inst.func0(-1), -1);\n    \
+         assert_eq!(inst.func1(), 2);",
+    );
+}
+
+#[test]
 fn store_at_offset_is_readable() {
     // A memarg offset is folded into the effective address.
     transpile_compile_run(

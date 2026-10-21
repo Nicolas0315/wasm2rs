@@ -155,6 +155,7 @@ pub(super) fn render_module(
     inner.extend(wasi_method_lines(parts.imports, layout.wasi_files));
     inner.extend(helper_method_lines(
         used,
+        parts.memories,
         ctx.memory_shared,
         ctx.unsafe_memory,
     ));
@@ -680,6 +681,7 @@ fn wasi_method_lines(imports: &[ImportInfo], wasi_files: bool) -> Vec<String> {
 /// the variants that lock `self.memory.bytes()` instead of borrowing.
 fn helper_method_lines(
     used: &HashSet<(Helper, u32)>,
+    memories: &[super::MemInfo],
     memory_shared: bool,
     unsafe_memory: bool,
 ) -> Vec<String> {
@@ -688,6 +690,9 @@ fn helper_method_lines(
     mem_indices.sort_unstable();
     mem_indices.dedup();
     for mem in mem_indices {
+        let max_pages = memories
+            .get(mem as usize)
+            .and_then(|memory| memory.max_pages);
         for helper in HELPER_ORDER {
             if used.contains(&(helper, mem)) {
                 inner.push(String::new());
@@ -695,9 +700,9 @@ fn helper_method_lines(
                     // The shared-memory backend locks `self.memory.bytes()` per
                     // body; unchecked access is not wired through that guard, so
                     // `unsafe_memory` does not apply to a shared memory.
-                    inner.extend(shared_helper_lines(helper));
+                    inner.extend(shared_helper_lines(helper, max_pages));
                 } else {
-                    inner.extend(helper_lines(helper, mem, unsafe_memory));
+                    inner.extend(helper_lines(helper, mem, max_pages, unsafe_memory));
                 }
             }
         }

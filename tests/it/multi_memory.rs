@@ -133,3 +133,30 @@ fn memory_size_and_grow_select_their_memory() {
          assert_eq!(inst.func0(), 1);",
     );
 }
+
+#[test]
+fn declared_maxima_limit_each_memory_independently() {
+    // The two memories have different maxima. A failed growth of either one
+    // must leave the other memory and the failed memory's size unchanged.
+    compile_run(
+        "multimem_declared_maxima",
+        r#"(module
+            (memory 1 2)
+            (memory 2 3)
+            (func (param i32) (result i32) local.get 0 memory.grow)
+            (func (param i32) (result i32) local.get 0 memory.grow 1)
+            (func (result i32) memory.size)
+            (func (result i32) memory.size 1))"#,
+        "let mut inst = Instance::new(); \
+         assert_eq!(inst.func0(1), 1); \
+         assert_eq!(inst.func2(), 2); \
+         assert_eq!(inst.func0(1), -1); \
+         assert_eq!(inst.func2(), 2); \
+         assert_eq!(inst.func3(), 2); \
+         assert_eq!(inst.func1(1), 2); \
+         assert_eq!(inst.func3(), 3); \
+         assert_eq!(inst.func1(1), -1); \
+         assert_eq!(inst.func3(), 3); \
+         assert_eq!(inst.func2(), 2);",
+    );
+}

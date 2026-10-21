@@ -186,3 +186,39 @@ fn imported_memory_grow_extends_the_host_buffer() {
     let run = Command::new(&bin).status().expect("run generated binary");
     assert!(run.success(), "imported memory grow failed");
 }
+
+#[test]
+fn imported_memory_grow_respects_module_declared_maximum() {
+    // The host Vec has no separate wasm maximum API. The module's declared
+    // maximum of two pages still constrains `memory.grow` before resize.
+    let wat = r#"
+        (module
+          (import "env" "mem" (memory 1 2))
+          (func (param i32) (result i32) (memory.grow (local.get 0)))
+          (func (result i32) (memory.size))
+          (func (param i32 i32) (i32.store8 (local.get 0) (local.get 1)))
+          (func (param i32) (result i32) (i32.load8_u (local.get 0))))
+        "#;
+    let extra = r#"
+        struct Host { mem: Vec<u8> }
+        impl Imports for Host {
+            fn memory(&self) -> &[u8] { &self.mem }
+            fn memory_mut(&mut self) -> &mut Vec<u8> { &mut self.mem }
+        }
+        fn main() {
+            let host = Host { mem: vec![0u8; 65536] };
+            let mut inst = Instance::new(host);
+            inst.func2(0, 0x5A);
+            assert_eq!(inst.func0(1), 1);
+            assert_eq!(inst.func1(), 2);
+            assert_eq!(inst.func3(0), 0x5A);
+            assert_eq!(inst.func0(1), -1);
+            assert_eq!(inst.func1(), 2);
+            assert_eq!(inst.memory().len(), 2 * 65536);
+            assert_eq!(inst.func3(0), 0x5A);
+        }
+        "#;
+    let bin = compile("grow_declared_maximum", wat, extra);
+    let run = Command::new(&bin).status().expect("run generated binary");
+    assert!(run.success(), "imported memory maximum was not enforced");
+}

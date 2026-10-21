@@ -145,8 +145,13 @@ pub(super) const HELPER_ORDER: [Helper; 50] = [
 /// `i > 0` the method name gains an `_m{i}` suffix and the body borrows
 /// `self.mem{i}()`/`self.mem{i}_mut()`, so each memory owns an independent
 /// helper set.
-pub(super) fn helper_lines(helper: Helper, mem: u32, unsafe_memory: bool) -> Vec<String> {
-    let base = base_helper_lines(helper);
+pub(super) fn helper_lines(
+    helper: Helper,
+    mem: u32,
+    max_pages: Option<u64>,
+    unsafe_memory: bool,
+) -> Vec<String> {
+    let base = base_helper_lines(helper, max_pages);
     // The unchecked rewrite runs on the memory-0 template (whose accessors are
     // the literal `self.mem()`/`self.mem_mut()`) before `specialise_helper_lines`
     // retargets them to `mem{i}`, so both memory 0 and `i > 0` get the same
@@ -269,8 +274,8 @@ fn specialise_helper_lines(helper: Helper, mem: u32, base: Vec<String>) -> Vec<S
 /// method name and signature are unchanged (`fn r32(&self, ...)`, …); a store
 /// helper keeps its `&mut self` even though `bytes()` needs only `&self`.
 /// `table_*` helpers touch no memory, so they are emitted verbatim.
-pub(super) fn shared_helper_lines(helper: Helper) -> Vec<String> {
-    let base = base_helper_lines(helper);
+pub(super) fn shared_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
+    let base = base_helper_lines(helper, max_pages);
     if matches!(helper, Helper::TableCopy | Helper::TableFill) {
         return base;
     }
@@ -296,7 +301,7 @@ pub(super) fn shared_helper_lines(helper: Helper) -> Vec<String> {
 }
 
 /// The memory-0 template lines of one memory helper method.
-fn base_helper_lines(helper: Helper) -> Vec<String> {
+fn base_helper_lines(helper: Helper, max_pages: Option<u64>) -> Vec<String> {
     let owned = |lines: &[&str]| lines.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
     match helper {
         Helper::LoadI32 => owned(&[
@@ -664,14 +669,17 @@ fn base_helper_lines(helper: Helper) -> Vec<String> {
             "    self.mem_mut()[a..a + 8].copy_from_slice(&value.to_le_bytes()[o..o + 8]);",
             "}",
         ]),
-        // `delta` is an unsigned page count. Growth past the wasm32 limit of
-        // 65536 pages (4 GiB) fails, returning -1 as the wasm spec requires;
-        // the declared maximum is not tracked, so only that hard cap applies.
+        // `delta` is an unsigned page count. Growth past the declared maximum
+        // or wasm32 hard cap fails before resizing, returning -1 as the spec
+        // requires.
         Helper::Grow => vec![
             "fn memory_grow(&mut self, delta: i32) -> i32 {".to_string(),
             format!("    let old_pages = (self.mem().len() / {WASM_PAGE_SIZE}) as u64;"),
             "    let new_pages = old_pages + (delta as u32 as u64);".to_string(),
-            format!("    if new_pages > {WASM_MAX_PAGES} {{"),
+            format!(
+                "    if new_pages > {} {{",
+                max_pages.unwrap_or(WASM_MAX_PAGES).min(WASM_MAX_PAGES)
+            ),
             "        return -1;".to_string(),
             "    }".to_string(),
             format!("    self.mem_mut().resize((new_pages as usize) * {WASM_PAGE_SIZE}, 0);"),
