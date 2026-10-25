@@ -123,6 +123,27 @@ let rust = transpile_with_options(&wasm, &TranspileOptions { unsafe_memory: fals
 
 Streaming/split transpilation is available via `transpile_split_with_options`, and `cargo_manifest` produces the recommended `Cargo.toml` for split output.
 
+### Native WASI filesystem limits
+
+The native WASI filesystem subset uses one preopened directory (fd 3), defaulting
+to the current directory. `Instance::new().with_preopen_root(root)` selects a
+different host root. Guest absolute paths and `..` components are rejected with
+ENOTCAPABLE (76), as is traversal through **any symlink**, including links whose
+targets stay inside the root. `path_open` and `path_link` also reject final
+symlinks, regardless of follow flags. A no-follow `path_filestat_get` can inspect
+the final link itself; unlink and rename can operate on the link itself. Symlink
+creation preserves the target string, but subsequent guest operations cannot
+traverse that link. Mutators cannot replace or remove the preopen root.
+
+This dependency-free implementation checks paths using separate standard-library
+filesystem calls. **The host must prevent concurrent mutation of the preopen
+tree and its ancestors** while guest filesystem calls run; validation and use
+are not atomic. Use a private root without outside hard links, device files, or
+mounts that expose other host data. This subset is not a complete sandbox for a
+shared, concurrently modified filesystem. WASI imports outside the native subset
+(including `path_readlink`) are delegated to the supplied host implementation,
+which must enforce its own confinement policy.
+
 ## License
 
 Licensed under the [MIT License](LICENSE).

@@ -984,3 +984,195 @@ fn main() {
         .expect("run generated binary");
     assert!(status.success(), "fd_readdir bogus fd assertions failed");
 }
+
+// Exercise the generated native WASI entry points with guest-controlled memory
+// against a private synthetic root and sibling outside directory. Removing any
+// traversal check must allow one of these calls to reach the outside fixture.
+const CONFINEMENT: &str = r#"
+    (module
+      (import "wasi_snapshot_preview1" "path_open"
+        (func (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
+      (import "wasi_snapshot_preview1" "path_filestat_get"
+        (func (param i32 i32 i32 i32 i32) (result i32)))
+      (import "wasi_snapshot_preview1" "path_create_directory"
+        (func (param i32 i32 i32) (result i32)))
+      (import "wasi_snapshot_preview1" "path_remove_directory"
+        (func (param i32 i32 i32) (result i32)))
+      (import "wasi_snapshot_preview1" "path_unlink_file"
+        (func (param i32 i32 i32) (result i32)))
+      (import "wasi_snapshot_preview1" "path_rename"
+        (func (param i32 i32 i32 i32 i32 i32) (result i32)))
+      (import "wasi_snapshot_preview1" "path_symlink"
+        (func (param i32 i32 i32 i32 i32) (result i32)))
+      (import "wasi_snapshot_preview1" "path_link"
+        (func (param i32 i32 i32 i32 i32 i32 i32) (result i32)))
+      (import "wasi_snapshot_preview1" "fd_readdir"
+        (func (param i32 i32 i32 i64 i32) (result i32)))
+      (memory 1))
+"#;
+
+const CONFINEMENT_HELPERS: &str = r#"
+pub fn put(i: &mut Instance, p: usize, s: &str) -> i32 {
+    i.mem_mut()[p..p + s.len()].copy_from_slice(s.as_bytes());
+    s.len() as i32
+}
+pub fn open(i: &mut Instance, path: &str, oflags: i32) -> i32 {
+    let n = put(i, 100, path);
+    i.wasi_path_open(3, 1, 100, n, oflags, 2, 0, 0, 700)
+}
+pub fn stat(i: &mut Instance, path: &str, flags: i32) -> i32 {
+    let n = put(i, 100, path);
+    i.wasi_path_filestat_get(3, flags, 100, n, 800)
+}
+pub fn symlink(i: &mut Instance, target: &str, path: &str) -> i32 {
+    let t = put(i, 100, target);
+    let p = put(i, 300, path);
+    i.wasi_path_symlink(100, t, 3, 300, p)
+}
+pub fn rename(i: &mut Instance, old: &str, new: &str) -> i32 {
+    let a = put(i, 100, old);
+    let b = put(i, 300, new);
+    i.wasi_path_rename(3, 100, a, 3, 300, b)
+}
+pub fn hardlink(i: &mut Instance, old: &str, new: &str) -> i32 {
+    let a = put(i, 100, old);
+    let b = put(i, 300, new);
+    i.wasi_path_link(3, 0, 100, a, 3, 300, b)
+}
+pub fn setup() -> Instance {
+    std::fs::create_dir("root").unwrap();
+    std::fs::create_dir("outside").unwrap();
+    std::fs::create_dir("outside/empty").unwrap();
+    std::fs::write("outside/secret", b"outside-marker").unwrap();
+    std::fs::write("root/local", b"local-marker").unwrap();
+    Instance::new().with_preopen_root("root")
+}
+"#;
+
+fn confinement_case(name: &str, main: &str) {
+    let extra = format!("{CONFINEMENT_HELPERS}\n{main}");
+    let unique = format!("confinement_{name}_{}", std::process::id());
+    let (bin, dir) = compile(&unique, CONFINEMENT, &extra);
+    let out = Command::new(&bin)
+        .current_dir(&dir)
+        .output()
+        .expect("run confinement fixture");
+    assert!(
+        out.status.success(),
+        "{name}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn wasi_symlink_traversal_is_rejected_by_all_path_consumers() {
+    confinement_case(
+        "paths",
+        r#"
+fn main() {
+    let mut i = setup();
+    assert_eq!(symlink(&mut i, "../outside", "escape"), 0);
+    assert_eq!(open(&mut i, "escape/secret", 0), 76, "read through a guest-created link");
+    assert_eq!(open(&mut i, "escape/secret", 8), 76, "truncate through a link");
+    assert_eq!(open(&mut i, "escape/new", 1), 76, "create through a link");
+    assert_eq!(stat(&mut i, "escape/secret", 0), 76);
+    assert_eq!(stat(&mut i, "escape/secret", 1), 76);
+    let n = put(&mut i, 100, "escape/newdir");
+    assert_eq!(i.wasi_path_create_directory(3, 100, n), 76);
+    let n = put(&mut i, 100, "escape/empty");
+    assert_eq!(i.wasi_path_remove_directory(3, 100, n), 76);
+    let n = put(&mut i, 100, "escape/secret");
+    assert_eq!(i.wasi_path_unlink_file(3, 100, n), 76);
+    assert_eq!(rename(&mut i, "escape/secret", "stolen"), 76);
+    assert_eq!(rename(&mut i, "local", "escape/moved"), 76);
+    assert_eq!(hardlink(&mut i, "escape/secret", "stolen"), 76);
+    assert_eq!(hardlink(&mut i, "local", "escape/hard"), 76);
+    assert_eq!(symlink(&mut i, "local", "escape/newlink"), 76);
+    assert_eq!(symlink(&mut i, "../outside/secret", "filelink"), 0);
+    assert_eq!(open(&mut i, "filelink", 0), 76, "final symlink");
+    assert_eq!(stat(&mut i, "filelink", 1), 76, "follow flag cannot escape");
+    assert_eq!(hardlink(&mut i, "filelink", "hardlink"), 76);
+    assert_eq!(symlink(&mut i, "../outside/missing", "dangling"), 0);
+    assert_eq!(open(&mut i, "dangling", 1), 76, "dangling link creation");
+    let outside = std::fs::canonicalize("outside").unwrap();
+    assert_eq!(symlink(&mut i, outside.to_str().unwrap(), "absolute"), 0);
+    assert_eq!(open(&mut i, "absolute/secret", 0), 76, "absolute target");
+    std::fs::create_dir("root/inner").unwrap();
+    assert_eq!(symlink(&mut i, "inner", "internal"), 0);
+    assert_eq!(open(&mut i, "internal/new", 1), 76, "all traversal fails closed");
+    assert_eq!(std::fs::read("outside/secret").unwrap(), b"outside-marker");
+    assert!(std::path::Path::new("outside/empty").is_dir());
+    for path in ["outside/new", "outside/newdir", "outside/moved", "outside/hard", "outside/newlink", "outside/missing"] {
+        assert!(!std::path::Path::new(path).exists(), "unexpected outside mutation: {path}");
+    }
+    assert_eq!(std::fs::read("root/local").unwrap(), b"local-marker");
+    assert_eq!(open(&mut i, "./inner//new", 1), 0, "ordinary nested create");
+    assert_eq!(open(&mut i, "missing/file", 0), 44, "missing parent");
+}
+"#,
+    );
+}
+
+#[test]
+fn wasi_final_symlink_no_follow_operations_remain_available() {
+    confinement_case(
+        "nofollow",
+        r#"
+fn main() {
+    let mut i = setup();
+    assert_eq!(symlink(&mut i, "../outside/secret", "link"), 0);
+    assert_eq!(stat(&mut i, "link", 0), 0, "lstat of the link itself");
+    assert_eq!(i.mem()[816], 7, "WASI symlink type");
+    assert_eq!(rename(&mut i, "link", "renamed"), 0);
+    let n = put(&mut i, 100, "renamed");
+    assert_eq!(i.wasi_path_unlink_file(3, 100, n), 0);
+    assert_eq!(std::fs::read("outside/secret").unwrap(), b"outside-marker");
+    assert_eq!(hardlink(&mut i, "local", "hard"), 0, "regular hard links");
+    assert_eq!(rename(&mut i, "hard", "moved"), 0, "regular rename");
+    assert_eq!(open(&mut i, ".", 0), 0, "root directory can still be opened");
+    assert_eq!(i.wasi_fd_readdir(3, 1000, 512, 0, 900), 0);
+}
+"#,
+    );
+}
+
+#[test]
+fn wasi_readdir_revalidates_a_directory_replaced_by_a_guest_symlink() {
+    confinement_case(
+        "readdir",
+        r#"
+fn main() {
+    let mut i = setup();
+    std::fs::create_dir("root/dir").unwrap();
+    assert_eq!(open(&mut i, "dir", 0), 0);
+    let fd = u32::from_le_bytes(i.mem()[700..704].try_into().unwrap()) as i32;
+    assert_eq!(rename(&mut i, "dir", "saved"), 0);
+    assert_eq!(symlink(&mut i, "../outside", "dir"), 0);
+    assert_eq!(i.wasi_fd_readdir(fd, 1000, 512, 0, 900), 76, "reopening must recheck the path");
+}
+"#,
+    );
+}
+
+#[test]
+fn wasi_mutators_cannot_replace_the_preopen_root() {
+    confinement_case(
+        "root",
+        r#"
+fn main() {
+    let mut i = setup();
+    for path in ["", ".", "././"] {
+        let n = put(&mut i, 100, path);
+        assert_eq!(i.wasi_path_remove_directory(3, 100, n), 76);
+        assert_eq!(i.wasi_path_unlink_file(3, 100, n), 76);
+        assert_eq!(i.wasi_path_create_directory(3, 100, n), 76);
+        assert_eq!(rename(&mut i, path, "moved"), 76);
+        assert_eq!(rename(&mut i, "local", path), 76);
+        assert_eq!(symlink(&mut i, "../outside", path), 76);
+        assert_eq!(hardlink(&mut i, "local", path), 76);
+    }
+    assert_eq!(std::fs::read("root/local").unwrap(), b"local-marker");
+}
+"#,
+    );
+}

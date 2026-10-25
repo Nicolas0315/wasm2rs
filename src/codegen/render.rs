@@ -566,11 +566,23 @@ fn constructor_lines(
     }
     // Re-point the single WASI preopen away from the process CWD. Guest
     // `path_*`/`fd_readdir` calls then resolve within `root`, which is also the
-    // name advertised through `fd_prestat_dir_name`; absolute-path and `..`
-    // escapes are still refused. Chained after `new`, e.g.
+    // name advertised through `fd_prestat_dir_name`. Guest symlink traversal
+    // is refused; the host must exclude concurrent tree/ancestor mutations.
+    // Chained after `new`, e.g.
     // `Instance::new(host).with_preopen_root("/usr/share/zoneinfo")`.
     if wasi_preopen {
         inner.push(String::new());
+        inner.push(
+            "/// Set the host-owned preopen root; guest symlink traversal is refused.".to_string(),
+        );
+        inner.push(
+            "/// The host must exclude concurrent mutation of this tree and its ancestors."
+                .to_string(),
+        );
+        inner.push(
+            "/// Standard-library path checks and filesystem operations are not atomic."
+                .to_string(),
+        );
         inner.push(
             "pub fn with_preopen_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {"
                 .to_string(),
@@ -662,6 +674,13 @@ fn table_accessor_lines(parts: &ModuleParts<'_>) -> Vec<String> {
 fn wasi_method_lines(imports: &[ImportInfo], wasi_files: bool) -> Vec<String> {
     let mut inner: Vec<String> = Vec::new();
     let mut wasi_emitted: Vec<WasiFn> = Vec::new();
+    if imports
+        .iter()
+        .any(|im| im.wasi.is_some_and(WasiFn::resolves_path))
+    {
+        inner.push(String::new());
+        inner.extend(super::wasi::path_resolver_lines());
+    }
     for im in imports {
         if let Some(w) = im.wasi
             && !wasi_emitted.contains(&w)
